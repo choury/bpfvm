@@ -134,7 +134,11 @@ Function *rewriteFunction(Function &F, StructType *PackTy) {
     SmallVector<Type *, 8> newArgTys;
     for (unsigned i = 0; i < KEEP_REGS && i < F.arg_size(); ++i)
         newArgTys.push_back(F.getFunctionType()->getParamType(i));
+#if LLVM_VERSION_MAJOR >= 21
+    newArgTys.push_back(PointerType::getUnqual(PackTy->getContext()));
+#else
     newArgTys.push_back(PointerType::getUnqual(PackTy));
+#endif
 
     FunctionType *newFTy = FunctionType::get(F.getReturnType(), newArgTys, false);
 
@@ -547,7 +551,11 @@ bool lowerI128Returns(Module &M) {
                 IRBuilder<> B(RI);
                 B.CreateStore(rv, sretArg);
             }
+#if LLVM_VERSION_MAJOR >= 21
+            ReturnInst::Create(Ctx, nullptr, RI->getIterator());
+#else
             ReturnInst::Create(Ctx, nullptr, RI);
+#endif
             RI->eraseFromParent();
         }
         F->dropAllReferences();

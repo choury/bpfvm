@@ -323,23 +323,25 @@ private:
 
 class vm: public std::enable_shared_from_this<vm> {
 private:
-    TlbEntry tlb[TLB_SIZE]{};
+    // -- JIT-critical fields (must be before TLB so offsets fit in AArch64 STR/LDR 12-bit immediate) --
     vmOptions options;
-    AtomicSharedPtr<const vmImage> image_;
     uint64_t pc_;
     uint64_t reg[11];
+    std::atomic<uint32_t> flags{0};
+    // 内联 push_frame 时暂存 frame_base：write-probe 的内联 TLB 踩掉全部 scratch 寄存器，
+    //   frame_base 无处安放；压栈会在 abort 跳 .flush_and_exit 时栈失衡。存这里安全。
+    uint64_t jit_scratch = 0;
+    uint64_t insn_count = 0;              // 已执行指令计数（JIT+解释器共用，单线程访问）
+    TlbEntry tlb[TLB_SIZE]{};
+    // -- other fields --
+    AtomicSharedPtr<const vmImage> image_;
     std::shared_ptr<std::vector<memmap>> maps = std::make_shared<std::vector<memmap>>();
     std::shared_ptr<std::mutex> maps_mutex = std::make_shared<std::mutex>();
     pthread_mutex_t wait_mutex;
     pthread_cond_t wait_cv;
-    std::atomic<uint32_t> flags{0};
     size_t signal_depth = 0;
-    uint64_t insn_count = 0;              // 已执行指令计数（JIT+解释器共用，单线程访问）
     uint64_t interp_insns = 0;            // 解释器执行的指令数
     uint64_t tp_ = 0;                     // thread pointer（BPF_SYS_SET_TLS 设置；单线程 TLS 模拟）
-    // 内联 push_frame 时暂存 frame_base：write-probe 的内联 TLB 踩掉全部 scratch 寄存器，
-    //   frame_base 无处安放；压栈会在 abort 跳 .flush_and_exit 时栈失衡。存这里安全。
-    uint64_t jit_scratch = 0;
 
     std::unique_ptr<JitCompilerBase> jit;
 

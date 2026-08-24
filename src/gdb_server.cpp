@@ -23,10 +23,6 @@
 #include <unordered_set>
 #include <vector>
 
-// BPF 寄存器在 g/G 包里的顺序与数量（r0..r9, r10=fp, pc）。
-// GDB bpf-tdep.c 把 r0..r10 + pc 列为 num_regs，每个 8 字节小端。
-static constexpr int GDB_NUM_REGS = 12;  // r0-r10 + pc
-
 GdbServer::GdbServer(std::shared_ptr<vm> main_vm, uint16_t port, bool stop_at_start)
     : main_vm(main_vm),current_vm(main_vm), port_(port), stop_at_start_(stop_at_start){}
 

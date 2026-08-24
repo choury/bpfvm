@@ -409,7 +409,11 @@ struct BpfEmutlsPass : public PassInfoMixin<BpfEmutlsPass> {
             auto *I = cast<Instruction>(U->getUser());
             // 把 ConstantExpr 在 I 之前展开成 Instruction。
             Instruction *Expanded = CE->getAsInstruction();
+#if LLVM_VERSION_MAJOR >= 21
+            Expanded->insertBefore(I->getIterator());
+#else
             Expanded->insertBefore(I);
+#endif
             U->set(Expanded);
             Changed = true;
         }
