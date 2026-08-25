@@ -1,5 +1,7 @@
 #include "posix_internal.h"
 
+#include <sys/un.h>
+
 int64_t PosixSyscall::do_socket(vm* v) {
     int domain   = arg_s32(v->r(1));
     int type     = arg_s32(v->r(2));
@@ -59,6 +61,71 @@ int64_t PosixSyscall::do_socketpair(vm* v) {
 // bind / listen / connect / shutdown —— 单 fd + 可选 sockaddr
 // ===========================================================================
 
+// AF_UNIX pathname 地址与文件 syscall 共用同一套路径视角（ps->root 前缀），
+// 否则 chroot 模式下 bind("/tmp/x.sock") 会落到宿主 /tmp 而非 rootfs 内。
+// 抽象命名空间（sun_path[0]=='\0'）不经文件系统，Linux chroot 同样不隔离，不转换。
+const struct sockaddr* PosixSyscall::sockaddr_to_host(const struct sockaddr* addr, socklen_t len,
+                                                      struct sockaddr_storage* out, socklen_t* out_len) {
+    if(len <= offsetof(struct sockaddr_un, sun_path) || addr->sa_family != AF_UNIX) {
+        return addr;
+    }
+    const struct sockaddr_un* un = reinterpret_cast<const struct sockaddr_un*>(addr);
+    if(un->sun_path[0] == '\0') {
+        return addr;
+    }
+    char path[sizeof(un->sun_path) + 1];
+    size_t avail = len - offsetof(struct sockaddr_un, sun_path);
+    if(avail > sizeof(un->sun_path)) {
+        avail = sizeof(un->sun_path);
+    }
+    memcpy(path, un->sun_path, avail);
+    path[avail] = '\0';   // 内核允许 sun_path 108 字节全满不 NUL 终止
+
+    std::string host = guest_abs_path(path);
+    if(!ps->root.empty() && ps->root != "/") {
+        host = std::filesystem::path(ps->root + host).lexically_normal().string();
+    }
+    socklen_t host_len = offsetof(struct sockaddr_un, sun_path) + host.size() + 1;
+    if(host_len > sizeof(struct sockaddr_un)) {
+        return nullptr;   // 加前缀后超出 sun_path 容量，调用方返回 -EINVAL
+    }
+    struct sockaddr_un* hun = reinterpret_cast<struct sockaddr_un*>(out);
+    memset(hun, 0, sizeof(*hun));
+    hun->sun_family = AF_UNIX;
+    memcpy(hun->sun_path, host.c_str(), host.size() + 1);
+    *out_len = host_len;
+    return reinterpret_cast<const struct sockaddr*>(hun);
+}
+
+// 原地改写（只会变短，安全）。capacity 是调用方映射 addr 时的缓冲容量：内核只写
+// min(容量, 记录地址长度) 字节，*len 却报完整记录长度（move_addr_to_user 语义），
+// 扫描与清零须以实际写入范围为上限——越过会破坏缓冲外 guest 内存。
+void PosixSyscall::sockaddr_to_guest(struct sockaddr* addr, socklen_t* len, socklen_t capacity) {
+    if(addr == nullptr || len == nullptr || capacity <= offsetof(struct sockaddr_un, sun_path)) {
+        return;
+    }
+    if(*len <= offsetof(struct sockaddr_un, sun_path) || addr->sa_family != AF_UNIX) {
+        return;
+    }
+    struct sockaddr_un* un = reinterpret_cast<struct sockaddr_un*>(addr);
+    if(un->sun_path[0] == '\0') {
+        return;
+    }
+    if(ps->root.empty() || ps->root == "/") {
+        return;
+    }
+    size_t written = std::min(capacity, *len) - offsetof(struct sockaddr_un, sun_path);
+    std::string host_path(un->sun_path, strnlen(un->sun_path, written));
+    const std::string prefix = ps->root + "/";
+    if(host_path.compare(0, prefix.size(), prefix) != 0) {
+        return;   // 无 root 前缀的路径原样保留
+    }
+    std::string guest_path = "/" + host_path.substr(prefix.size());
+    memset(un->sun_path, 0, written);
+    memcpy(un->sun_path, guest_path.c_str(), guest_path.size() + 1);
+    *len = offsetof(struct sockaddr_un, sun_path) + guest_path.size() + 1;
+}
+
 int64_t PosixSyscall::do_bind(vm* v) {
     int guest_fd = arg_s32(v->r(1));
     auto h = ps->find_fd(guest_fd);
@@ -70,7 +137,13 @@ int64_t PosixSyscall::do_bind(vm* v) {
     if(addr == nullptr) {
         return -EFAULT;
     }
-    if(::bind(h->host_fd(), addr, addrlen) < 0) {
+    struct sockaddr_storage haddr;
+    socklen_t haddrlen = addrlen;
+    const struct sockaddr* host_addr = sockaddr_to_host(addr, addrlen, &haddr, &haddrlen);
+    if(host_addr == nullptr) {
+        return -EINVAL;
+    }
+    if(::bind(h->host_fd(), host_addr, haddrlen) < 0) {
         return -errno;
     }
     return 0;
@@ -100,7 +173,13 @@ int64_t PosixSyscall::do_connect(vm* v) {
     if(addr == nullptr) {
         return -EFAULT;
     }
-    if(::connect(h->host_fd(), addr, addrlen) < 0) {
+    struct sockaddr_storage haddr;
+    socklen_t haddrlen = addrlen;
+    const struct sockaddr* host_addr = sockaddr_to_host(addr, addrlen, &haddr, &haddrlen);
+    if(host_addr == nullptr) {
+        return -EINVAL;
+    }
+    if(::connect(h->host_fd(), host_addr, haddrlen) < 0) {
         // EINPROGRESS（非阻塞 socket，连接建立中）按 errno 透传；
         return (errno == EINTR) ? SYSCALL_RESTART : -errno;
     }
@@ -136,12 +215,13 @@ int64_t PosixSyscall::do_accept4(vm* v) {
 
     struct sockaddr* addr = nullptr;
     socklen_t* addrlen = nullptr;
+    socklen_t curlen = 0;   // 入参：缓冲区容量
     if(addr_arg != 0 && addrlen_arg != 0) {
         addrlen = static_cast<socklen_t*>(v->mmu_w(addrlen_arg, sizeof(socklen_t)));
         if(addrlen == nullptr) {
             return -EFAULT;
         }
-        socklen_t curlen = *addrlen;   // 入参：缓冲区容量
+        curlen = *addrlen;
         if(curlen > 0) {
             addr = static_cast<struct sockaddr*>(v->mmu_w(addr_arg, curlen));
             if(addr == nullptr) {
@@ -155,6 +235,7 @@ int64_t PosixSyscall::do_accept4(vm* v) {
         return (errno == EINTR) ? SYSCALL_RESTART : -errno;
     }
     // addrlen 已被 host 写回（实际对端地址长度），host 直接写进了 guest 内存。
+    sockaddr_to_guest(addr, addrlen, curlen);
 
     auto handle = std::make_shared<HostFd>(new_host);
     if(flags & SOCK_CLOEXEC) {
@@ -189,8 +270,17 @@ int64_t PosixSyscall::do_sendto(vm* v) {
             return -EFAULT;
         }
     }
+    struct sockaddr_storage haddr;
+    socklen_t haddrlen = addrlen;
+    const struct sockaddr* host_addr = addr;
+    if(addr != nullptr) {
+        host_addr = sockaddr_to_host(addr, addrlen, &haddr, &haddrlen);
+        if(host_addr == nullptr) {
+            return -EINVAL;
+        }
+    }
 
-    ssize_t rc = ::sendto(h->host_fd(), buf, len, flags, addr, addrlen);
+    ssize_t rc = ::sendto(h->host_fd(), buf, len, flags, host_addr, haddrlen);
     if(rc < 0) {
         return (errno == EINTR) ? SYSCALL_RESTART : -errno;
     }
@@ -212,12 +302,13 @@ int64_t PosixSyscall::do_recvfrom(vm* v) {
 
     struct sockaddr* addr = nullptr;
     socklen_t* addrlen = nullptr;
+    socklen_t curlen = 0;   // 入参：缓冲区容量
     if(v->r(5) != 0) {
         addrlen = static_cast<socklen_t*>(v->mmu_w(v->r(0), sizeof(socklen_t)));
         if(addrlen == nullptr) {
             return -EFAULT;
         }
-        socklen_t curlen = *addrlen;
+        curlen = *addrlen;
         if(curlen > 0) {
             addr = static_cast<struct sockaddr*>(v->mmu_w(v->r(5), curlen));
             if(addr == nullptr) {
@@ -231,6 +322,7 @@ int64_t PosixSyscall::do_recvfrom(vm* v) {
         return (errno == EINTR) ? SYSCALL_RESTART : -errno;
     }
     // addrlen 已被 host 写回（实际来源地址长度）。
+    sockaddr_to_guest(addr, addrlen, curlen);
     return rc;
 }
 
@@ -324,6 +416,19 @@ int64_t PosixSyscall::do_sendmsg(vm* v) {
     if(!translate_msghdr(v, gmsg, &hmsg, hiov, /*writable=*/false, &err)) {
         return err;
     }
+    // msg_name 的 AF_UNIX pathname 同样过 chroot 前缀转换（同 bind/connect）；
+    // haddr 需存活到 ::sendmsg 之后。
+    struct sockaddr_storage haddr;
+    if(hmsg.msg_name != nullptr && hmsg.msg_namelen > 0) {
+        socklen_t hlen = hmsg.msg_namelen;
+        const struct sockaddr* host_addr = sockaddr_to_host(
+            static_cast<const struct sockaddr*>(hmsg.msg_name), hmsg.msg_namelen, &haddr, &hlen);
+        if(host_addr == nullptr) {
+            return -EINVAL;
+        }
+        hmsg.msg_name = const_cast<struct sockaddr*>(host_addr);
+        hmsg.msg_namelen = hlen;
+    }
     // cmsg 缓冲区需可写（SCM_RIGHTS 要把 guest fd 改写成 host fd），但 translate_msghdr
     // 用 mmu（只读语义）翻译的。拷一份到本地再改，避免污染 guest 的 cmsg（guest 的 fd
     // 原样保留，重复 sendmsg 时还能用）。
@@ -379,6 +484,9 @@ int64_t PosixSyscall::do_recvmsg(vm* v) {
     if(rc < 0) {
         return (errno == EINTR) ? SYSCALL_RESTART : -errno;
     }
+    // 容量取 guest 传入的 msg_namelen（此刻 gmsg 尚未被写回，仍是原值）。
+    sockaddr_to_guest(static_cast<struct sockaddr*>(hmsg.msg_name), &hmsg.msg_namelen,
+                      gmsg->msg_namelen);
     // host 写回的状态拷给 guest msghdr
     gmsg->msg_flags = hmsg.msg_flags;
     gmsg->msg_namelen = hmsg.msg_namelen;
@@ -457,7 +565,7 @@ int64_t PosixSyscall::do_getsockopt(vm* v) {
 // getsockname / getpeername：addr 缓冲区按入参 *addrlen 容量映射（而非固定
 // sizeof(struct sockaddr)=16B）。否则 AF_UNIX（sockaddr_un=110B）等大地址族会让
 // host 内核按 *addrlen 写越界。模式同 do_accept4。
-static inline int64_t do_sockname_common(vm* v, int host_fd,
+static inline int64_t do_sockname_common(vm* v, PosixSyscall* self, int host_fd,
         int (*host_call)(int, struct sockaddr*, socklen_t*)) {
     socklen_t* addrlen = static_cast<socklen_t*>(v->mmu_w(v->r(3), sizeof(socklen_t)));
     if(addrlen == nullptr) {
@@ -474,6 +582,7 @@ static inline int64_t do_sockname_common(vm* v, int host_fd,
     if(host_call(host_fd, addr, addrlen) < 0) {
         return -errno;
     }
+    self->sockaddr_to_guest(addr, addrlen, curlen);
     return 0;
 }
 
@@ -482,7 +591,7 @@ int64_t PosixSyscall::do_getsockname(vm* v) {
     if(!h) {
         return -EBADF;
     }
-    return do_sockname_common(v, h->host_fd(), ::getsockname);
+    return do_sockname_common(v, this, h->host_fd(), ::getsockname);
 }
 
 int64_t PosixSyscall::do_getpeername(vm* v) {
@@ -490,7 +599,7 @@ int64_t PosixSyscall::do_getpeername(vm* v) {
     if(!h) {
         return -EBADF;
     }
-    return do_sockname_common(v, h->host_fd(), ::getpeername);
+    return do_sockname_common(v, this, h->host_fd(), ::getpeername);
 }
 
 // ===========================================================================

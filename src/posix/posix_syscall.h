@@ -11,6 +11,7 @@
 #include <optional>
 #include <unistd.h>
 #include <fcntl.h>   // AT_FDCWD（guest_abs_path/resolve_path 的 dirfd 默认值）
+#include <sys/socket.h>   // sockaddr/socklen_t（sockaddr_to_host/to_guest 声明）
 
 // 信号队列扫描上限（handle_signals 单轮最多处理的信号数，防止极端情况下死循环）。
 // 原 MpscQueue 的固定容量；改 deque+锁后队列本身无界，此常量仅作单轮 drain 上限。
@@ -276,6 +277,12 @@ public:
     // 把任意 guest 路径（相对则用 dirfd 对应目录或 cwd）规范化为 guest 视角的绝对路径
     // 用于 Fd::path 存储与特殊设备（/dev/ptmx 等）匹配 —— 这些都应基于 guest 命名空间。
     std::string guest_abs_path(const std::string& path, int dirfd = AT_FDCWD);
+
+    // AF_UNIX pathname 地址的 chroot 视角转换
+    // 入向 guest sun_path -> 宿主路径，出向宿主写回的地址剥回 guest 视角。语义见 socket.cpp。
+    const struct sockaddr* sockaddr_to_host(const struct sockaddr* addr, socklen_t len,
+                                            struct sockaddr_storage* out, socklen_t* out_len);
+    void sockaddr_to_guest(struct sockaddr* addr, socklen_t* len, socklen_t capacity);
 
     // 宿主侧信号（物理终端 ^C/^Z/^\ / 终端挂断 / 外部 kill 给 bpfvm）转交 handler 路由。
     // 凭本 handler 掌握的 session/ctty/前台组决定目标：有控制终端->发到 ctty 的前台

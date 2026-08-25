@@ -145,25 +145,30 @@ if(BUILD_TESTING)
         set(BPFVM_BPF_PATH "${CMAKE_BINARY_DIR}/bpfvm.bpf")
     endif()
 
-    # 每个用例一个 ctest 条目，内部串行跑多变体（静态/动态 x JIT 开/关 + host + 嵌套）。
+    # 每个用例一个 ctest 条目，内部串行跑多变体（动态 x JIT 开/关 + host + 嵌套静态）。
     # 不同用例之间由 ctest -j 并发；同用例变体串行，不冲突文件。
-    # ROOT 参数非空时走 chroot 模式（建临时 rootfs + --root 启动 + marker 落位校验）。
+    # name 定位 test/<name>.<suffix>；ARGV1 = ctest 条目名（缺省同 name）；
+    # ARGV2 非空 = chroot 模式（建临时 rootfs + --root 启动）。
     function(add_bpf_program_test name)
+        set(tname "${ARGV1}")
+        if(tname STREQUAL "")
+            set(tname "${name}")
+        endif()
         set(extra_args)
-        if(name IN_LIST BPF_ROOT_TESTS)
+        if(NOT "${ARGV2}" STREQUAL "")
             list(APPEND extra_args -DROOT=1)
         endif()
         if(DEFINED BPFVM_BPF_PATH)
             list(APPEND extra_args -DBPFVM_BPF=${BPFVM_BPF_PATH})
         endif()
-        add_test(NAME ${name}
+        add_test(NAME ${tname}
             COMMAND ${CMAKE_COMMAND}
                 -DBPFVM=$<TARGET_FILE:bpfvm>
                 -DNAME=${name}
                 -DWORKDIR=${CMAKE_SOURCE_DIR}
                 ${extra_args}
                 -P ${CMAKE_SOURCE_DIR}/cmake/RunBpfProgram.cmake)
-        set_tests_properties(${name} PROPERTIES
+        set_tests_properties(${tname} PROPERTIES
             FIXTURES_REQUIRED bpf_programs_built
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             TIMEOUT 300
@@ -174,22 +179,30 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/test/test_*.c"
         "${CMAKE_SOURCE_DIR}/test/test_*.cpp")
 
-    # 不自动注册为独立测试的辅助程序（被其他测试调用）。
+    # 不注册普通独立条目的程序：被其他测试调用的辅助程序，以及仅以 chroot
+    # 变体注册的用例（见 BPF_ROOT_TESTS）。
     set(BPF_TEST_HELPERS
         test_arg
         test_cloexec_child
+        test_root
     )
 
-    # 辅助程序里需要 --root chroot 隔离跑的：用标准 runner 的 ROOT 模式注册
-    # （建临时 rootfs + --root 启动 + 校验写操作落在 rootfs 内）。
+    # 需要 --root chroot 隔离跑的：为成员追加 <name>_chroot 条目。断言依赖
+    # chroot 生效的用例（test_root：getcwd=="/"、逃逸检测等离了 --root 必挂）
+    # 同时加进 BPF_TEST_HELPERS 跳过普通条目，_chroot 即唯一条目；断言两种
+    # 模式下都成立的用例（test_unix_sock 的地址往返）普通条目照常保留。
     set(BPF_ROOT_TESTS
         test_root
+        test_unix_sock
     )
 
     foreach(test_source IN LISTS TEST_SOURCES)
         get_filename_component(test_name "${test_source}" NAME_WE)
 
-        # ROOT 测试虽在 helpers，但单独注册（带 ROOT=1）。
+        if(test_name IN_LIST BPF_ROOT_TESTS)
+            add_bpf_program_test(${test_name} ${test_name}_chroot root)
+        endif()
+
         if(test_name IN_LIST BPF_TEST_HELPERS)
             continue()
         endif()

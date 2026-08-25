@@ -321,7 +321,7 @@ BPF_INLINE void complex_logic(int a, int b, int c, int d, int e, int f) {
 
 ### C++ 支持
 
-BPF VM 支持 **C++ 语言子集**：用 `clang++ -target bpf -fno-exceptions -frtti` 编译的程序，通过 `extern "C"` 使用 musl 的 C 运行时，并用 **libc++**（`libcxx.a`/`libcxx.so`）作为 C++ 标准库。由 `test/test_cpp_lang.cpp` 端到端验证（5 个 ctest 变体：static/dynamic × JIT/interp + host）；STL 覆盖由 `test/test_stl_*.cpp` 套件保证。
+BPF VM 支持 **C++ 语言子集**：用 `clang++ -target bpf -fno-exceptions -frtti` 编译的程序，通过 `extern "C"` 使用 musl 的 C 运行时，并用 **libc++**（`libcxx.a`/`libcxx.so`）作为 C++ 标准库。由 `test/test_cpp_lang.cpp` 端到端验证（ctest 变体：dynamic × JIT/interp + host + 嵌套静态）；STL 覆盖由 `test/test_stl_*.cpp` 套件保证。
 
 **无 C++ 运行时即可工作**（裸语言子集）：
 - 模板、类/结构体、构造/析构、单继承、虚函数（vtable 分派）。
@@ -343,7 +343,7 @@ BPF VM 支持 **C++ 语言子集**：用 `clang++ -target bpf -fno-exceptions -f
 **构建集成**（见 `test/Makefile`）：
 - `test/test_cpp_*.cpp` 自动发现；`CXX_FLAGS` 镜像 C 的 `CC_FLAGS`（相同的 target/CPU/stack-size/isystem/pass-plugin 标志）加上 `-std=c++23 -nostdinc++ -fno-exceptions -frtti` 和 libc++ 绕过宏（`-D_LIBCPP_HAS_THREAD_API_PTHREAD -D_LIBCPP_HAS_MUSL_LIBC ...`）。C++ pass 插件（`libBpfWideArgs.so`/`libBpfSoftFp.so`/`libBpfLibcallLower.so`/`libBpfEmutls.so`）随 C 的一起注入。
 - C++ 测试链接 `libcxx.a`（静态 `.out`）或 `libcxx.so`（动态 `.linked`），两者均由 `scripts/build_root.sh` 的 `build_libcxx` 产出（`scripts/build_libcxx.sh` → `libcxx.a`；`bpfvm-ld -shared` → `libcxx.so`，`DT_NEEDED libc.so`）。C 测试保持无任何 libcxx 依赖。
-- C++ 测试经 `cmake/RunBpfProgram.cmake` 运行与 C 测试相同的 5 个 ctest 变体。
+- C++ 测试经 `cmake/RunBpfProgram.cmake` 运行与 C 测试相同的 ctest 变体。
 - musl `libc.a` **不**提供 C++ ABI 符号（仅 C 式 `__cxa_atexit`/`__cxa_finalize`）；C++ 运行时——`operator new`/`delete`、libc++abi typeinfo vtable + `__dynamic_cast` + `__cxa_*`，以及 libc++ 库本身——来自 `libcxx.a`/`libcxx.so`。
 
 #### 模拟 TLS (emutls)

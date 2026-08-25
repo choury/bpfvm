@@ -62,9 +62,9 @@ CMake registers the following CTest cases under the `BUILD_TESTING` option (run 
 
 1. **`unit_tests`** — Runs the `bpfvm_test` executable (instruction-level unit tests from `insn_test.cpp`).
 2. **`bpf_programs_build`** — Invokes `make -C test` to compile all BPF test programs (`test/*.c` → `test/*.out`). Marked as a fixture (`FIXTURES_SETUP bpf_programs_built`); all subsequent BPF program tests depend on it automatically.
-3. **`test_*` series** — Auto-discovered from `test/test_*.c` files. Each test case runs `bpfvm <program>.out` via the `cmake/RunBpfProgram.cmake` script and checks the exit code against the expected value (default 0). Helper programs listed in `BPF_TEST_HELPERS` (e.g., `test_arg`, `test_cloexec_child`) are skipped and do not generate standalone test cases.
+3. **`test_*` series** — Auto-discovered from `test/test_*.c` files. Each test case runs the program through the `cmake/RunBpfProgram.cmake` runner in several variants (defined there) and checks the exit code against the expected value (default 0). Helper programs listed in `BPF_TEST_HELPERS` (e.g., `test_arg`, `test_cloexec_child`) are skipped and get no standalone entry. Members of `BPF_ROOT_TESTS` get an extra `<name>_chroot` entry (temp rootfs + `--root`); a test whose assertions require chroot (e.g., `test_root`) is listed in both so `_chroot` is its only entry.
 
-**Adding a new BPF test case:** Simply create a `test/test_<name>.c` file; CTest will auto-discover and register it. If the program is a helper (invoked by other tests rather than run independently), add it to the `BPF_TEST_HELPERS` list in `CMakeLists.txt`.
+**Adding a new BPF test case:** Simply create a `test/test_<name>.c` file; CTest will auto-discover and register it. If the program is a helper (invoked by other tests rather than run independently), add it to the `BPF_TEST_HELPERS` list in `CMakeLists.txt`. If it also needs a chroot (`--root`) variant, add it to `BPF_ROOT_TESTS`.
 
 ## JIT Compilation & Execution Model
 

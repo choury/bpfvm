@@ -1,4 +1,4 @@
-# 每个用例内部串行跑多变体：静态/动态 x JIT 开/关 + host + bpfvm-on-bpfvm 嵌套。
+# 每个用例内部串行跑多变体：动态 x JIT 开/关 + host + bpfvm-on-bpfvm 嵌套。
 # 不同用例之间由 ctest -j 并发。同用例的变体串行，不冲突文件。
 #
 # 参数：BPFVM / NAME / WORKDIR / ROOT（可选）/ BPFVM_BPF（可选）
@@ -42,18 +42,16 @@ set(BPF_NEST_SKIP
 )
 
 # label|program_suffix|BPF_TEST_VARIANT|JIT_ENABLE|JIT_THRESHOLD|nest_flag  ("-" 占位空值)
-# 前 4 个走 bpfvm（静态/动态 x JIT/解释器）。
+# 前 2 个走 bpfvm（动态 x JIT/解释器）。静态程序不设非嵌套变体（控制用例
+# 时长），其加载语义由 nest_static 覆盖。
 # JIT 变体设 JIT_THRESHOLD=1：每个 pc 命中一次即编译，最大化 JIT 覆盖（暴露冷代码
 # 路径里的 JIT 缺陷，而非只在热点循环上验证）。
-# 第 5 个 host 变体直接运行宿主 gcc 原生二进制（test/Makefile 的 *.host），
+# 第 3 个 host 变体直接运行宿主 gcc 原生二进制（test/Makefile 的 *.host），
 # 作为 BPF/musl/bpfvm 实现的对照基线：同一测试逻辑在标准 glibc 下也应通过。
-# 第 6 个 nest_static 变体跑 bpfvm-on-bpfvm 嵌套（仅当 BPFVM_BPF 可用）。
-# 只跑静态嵌套变体：动态变体与静态语义上已由 dynamic_jit/dynamic_interp 覆盖，
-# 多跑一个嵌套动态耗时显著增加且需额外环境变量，收益不大。
+# 第 4 个 nest_static 变体跑 bpfvm-on-bpfvm 嵌套（仅当 BPFVM_BPF 可用）。
+# 嵌套只跑静态：动态嵌套耗时显著增加且需额外环境变量，收益不大。
 set(variants
-    "static_jit|out|-|-|1|-"
     "dynamic_jit|linked|linked|-|1|-"
-    "static_interp|out|-|0|-|-"
     "dynamic_interp|linked|linked|0|-|-"
     "host|host|host|-|-|-"
     "nest_static|out|-|-|-|1"
